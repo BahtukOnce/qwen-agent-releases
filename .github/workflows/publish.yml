@@ -1,0 +1,92 @@
+name: Publish verified Windows build
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        required: true
+        type: string
+      download_url:
+        description: Short-lived link to the verified binary-only Actions artifact
+        required: true
+        type: string
+      artifact_sha256:
+        required: true
+        type: string
+      package_sha256:
+        required: true
+        type: string
+      installer_sha256:
+        required: true
+        type: string
+permissions:
+  contents: write
+concurrency:
+  group: publish-${{ inputs.version }}
+  cancel-in-progress: false
+jobs:
+  publish:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Download and verify binary-only artifact
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, os, re, urllib.parse, urllib.request, zipfile
+          from pathlib import Path
+          inputs = json.loads(Path(os.environ['GITHUB_EVENT_PATH']).read_text())['inputs']
+          url = inputs['download_url']
+          print('::add-mask::' + url, flush=True)
+          parsed = urllib.parse.urlsplit(url)
+          if parsed.scheme != 'https' or not parsed.hostname or not parsed.hostname.endswith(('.blob.core.windows.net', '.githubusercontent.com', '.actions.githubusercontent.com')):
+              raise SystemExit('Unexpected artifact download destination')
+          if not re.fullmatch(r'v\d+\.\d+\.\d+', inputs['version']):
+              raise SystemExit('Invalid release version')
+          for key in ('artifact_sha256', 'package_sha256', 'installer_sha256'):
+              if not re.fullmatch('[0-9a-f]{64}', inputs[key]):
+                  raise SystemExit('Invalid expected checksum')
+          digest = hashlib.sha256()
+          size = 0
+          with urllib.request.urlopen(url, timeout=60) as response, open('artifact.zip', 'wb') as output:
+              if not response.geturl().startswith('https://'):
+                  raise SystemExit('Insecure artifact redirect')
+              while chunk := response.read(1024 * 1024):
+                  size += len(chunk)
+                  if size > 1024 ** 3:
+                      raise SystemExit('Artifact exceeds size limit')
+                  digest.update(chunk)
+                  output.write(chunk)
+          if digest.hexdigest() != inputs['artifact_sha256']:
+              raise SystemExit('Artifact checksum mismatch')
+          expected = {'QwenAgent-windows-x64.zip': inputs['package_sha256'], 'dist/INSTALL.cmd': inputs['installer_sha256']}
+          with zipfile.ZipFile('artifact.zip') as archive:
+              files = [entry for entry in archive.infolist() if not entry.is_dir()]
+              if len(files) != len(expected) or {entry.filename for entry in files} != set(expected):
+                  raise SystemExit('Artifact must contain only the Windows package and installer')
+              for entry in files:
+                  digest = hashlib.sha256()
+                  size = 0
+                  with archive.open(entry) as source, open(Path(entry.filename).name, 'wb') as output:
+                      while chunk := source.read(1024 * 1024):
+                          size += len(chunk)
+                          if size > 1024 ** 3:
+                              raise SystemExit('Asset exceeds size limit')
+                          digest.update(chunk)
+                          output.write(chunk)
+                  if digest.hexdigest() != expected[entry.filename]:
+                      raise SystemExit('Release asset checksum mismatch')
+          Path('artifact.zip').unlink()
+          print('Verified installer and Windows package; no source checkout was copied')
+          PY
+      - name: Upload to draft release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ inputs.version }}
+        shell: bash
+        run: |
+          if gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --json isDraft --jq .isDraft > draft-state; then
+            test "$(cat draft-state)" = true || { echo 'Refusing to replace a published release'; exit 1; }
+          else
+            gh release create "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" --draft --title "Qwen Agent $RELEASE_TAG" --notes 'Windows x64 build. Run INSTALL.cmd once; use the in-app update button for future versions.'
+          fi
+          gh release upload "$RELEASE_TAG" INSTALL.cmd QwenAgent-windows-x64.zip --repo "$GITHUB_REPOSITORY" --clobber
