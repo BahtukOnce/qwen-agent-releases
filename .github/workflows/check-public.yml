@@ -1,0 +1,36 @@
+name: Verify public update downloads
+on:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  public-downloads:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - name: Check API and assets without GitHub credentials
+        shell: bash
+        run: |
+          python3 - <<'PY'
+          import hashlib, json, urllib.request
+          base = 'https://api.github.com/repos/BahtukOnce/qwen-agent-releases'
+          headers = {'User-Agent': 'QwenAgent-Anonymous-Check'}
+          with urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=30) as response:
+              assert json.load(response)['private'] is False
+          with urllib.request.urlopen(urllib.request.Request(base + '/releases/latest', headers=headers), timeout=30) as response:
+              release = json.load(response)
+              print('Public release:', release['tag_name'])
+          assert release['tag_name'] == 'v0.3.0' and not release['draft']
+          assets = {asset['name']: asset for asset in release['assets']}
+          for name in ('INSTALL.cmd', 'QwenAgent-windows-x64.zip'):
+              asset = assets[name]
+              digest = hashlib.sha256()
+              size = 0
+              with urllib.request.urlopen(asset['browser_download_url'], timeout=60) as response:
+                  while chunk := response.read(1024 * 1024):
+                      digest.update(chunk)
+                      size += len(chunk)
+              assert size == asset['size']
+              assert 'sha256:' + digest.hexdigest() == asset['digest']
+              print(name, 'downloads and verifies without an Authorization header')
+          PY
