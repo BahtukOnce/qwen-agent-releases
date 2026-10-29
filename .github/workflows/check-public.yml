@@ -12,7 +12,7 @@ jobs:
         shell: bash
         run: |
           python3 - <<'PY'
-          import hashlib, json, urllib.request
+          import hashlib, json, re, urllib.request
           base = 'https://api.github.com/repos/BahtukOnce/qwen-agent-releases'
           headers = {'User-Agent': 'QwenAgent-Anonymous-Check'}
           with urllib.request.urlopen(urllib.request.Request(base, headers=headers), timeout=30) as response:
@@ -20,7 +20,7 @@ jobs:
           with urllib.request.urlopen(urllib.request.Request(base + '/releases/latest', headers=headers), timeout=30) as response:
               release = json.load(response)
               print('Public release:', release['tag_name'])
-          assert release['tag_name'] == 'v0.3.0' and not release['draft']
+          assert re.fullmatch(r'v\d+\.\d+\.\d+', release['tag_name']) and not release['draft'] and not release['prerelease']
           assets = {asset['name']: asset for asset in release['assets']}
           for name in ('INSTALL.cmd', 'QwenAgent-windows-x64.zip'):
               asset = assets[name]
